@@ -11,8 +11,7 @@ namespace howdy::native::remove_internal {
 	                                                                      const std::string &user);
 
 	using RemoveUserModelEntryIfMatchesFn = howdy::native::UserModelMutationResult (*)(
-	    void *context, const std::string &user,
-	    const howdy::native::UserModelEntryExpectation &expected);
+	    void *context, const std::string &user, const howdy::native::UserModelEntry &expected);
 
 	struct RemoveDependencies {
 		void                           *context                            = nullptr;

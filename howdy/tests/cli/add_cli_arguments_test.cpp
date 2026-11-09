@@ -172,6 +172,33 @@ namespace howdy::test::add_cli {
 			return ok;
 		}
 
+		// Runs add with a command-line label and returns what it printed to stderr.
+		auto AddErrorFor(const std::string &label) -> std::string {
+			auto                     context = MakeSuccessContext();
+			std::ostringstream const errors;
+			std::streambuf *const    previous = std::cerr.rdbuf(errors.rdbuf());
+			const int result = RunAdd(context, {.resolved_user = "alice", .positionals = {label}});
+			std::cerr.rdbuf(previous);
+			return result == 1 && context.capture_calls == 0 ? errors.str() : std::string{};
+		}
+
+		auto LabelErrorsNameTheProblem() -> bool {
+			bool ok = Expect(AddErrorFor("abcdefghijklmnopqrstuvwxy").contains("too long"),
+			                 "25-byte label reports that it is too long");
+			ok &=
+			    Expect(AddErrorFor("office/desk-camera-left-side").contains("Invalid model label"),
+				       "long label with a path separator reports the separator first");
+			ok &= Expect(AddErrorFor("bad/name").contains("Invalid model label"),
+			             "label with a path separator reports an invalid label");
+			// U+202E RIGHT-TO-LEFT OVERRIDE, spelled as bytes so the source shows no bidi text.
+			const std::string bidi_override{'a', 'b', '\xE2', '\x80', '\xAE', 'c', 'd'};
+			ok &= Expect(AddErrorFor(bidi_override).contains("Invalid model label"),
+			             "label with a bidi override reports an invalid label");
+			ok &= Expect(AddErrorFor("a\u200Bb").contains("Invalid model label"),
+			             "label with a zero-width space reports an invalid label");
+			return ok;
+		}
+
 		auto LongCommandLabelStopsBeforeCapture() -> bool {
 			auto context = MakeSuccessContext();
 
@@ -277,6 +304,7 @@ namespace howdy::test::add_cli {
 		ok &= CommandLabelPreservesCsvCharacters();
 		ok &= InvalidLabelStopsBeforeCapture();
 		ok &= LongCommandLabelStopsBeforeCapture();
+		ok &= LabelErrorsNameTheProblem();
 		ok &= InteractiveLabelTruncatesTo24Characters();
 		ok &= InteractiveLabelTruncatesOnUtf8Boundary();
 		ok &= AppendFailureReturnsError();

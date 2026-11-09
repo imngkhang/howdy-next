@@ -1,20 +1,19 @@
 #include "storage/user_models.hpp"
 
-#include "storage/user_model_label.hpp"
-#include "storage/user_model_limits.hpp"
+#include "storage/user_model_codec.hpp"
 #include "storage/user_model_status.hpp"
 #include "storage/user_model_types.hpp"
 #include "support/atomic_files.hpp"
 #include "support/file_security.hpp"
 #include "support/file_security/validation_root.hpp"
-#include "user_model_codec/internal.hpp"
 #include "user_model_store/internal.hpp"
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <ctime>
+#include <expected>
 #include <iterator>
-#include <limits>
 #include <optional>
 #include <string>
 #include <utility>
@@ -25,12 +24,13 @@
 namespace howdy::native {
 
 	namespace {
-		constexpr auto kNewFaceModelEntryInvalidMessage = "New face model entry is invalid";
-		constexpr auto kModelUpdateFailedMessage        = "Failed to update model file";
-		constexpr auto kModelRemoveFailedMessage        = "Failed to remove model file";
-		constexpr auto kModelSaveFailedMessage          = "Failed to save model file";
+		constexpr auto kModelUpdateFailedMessage = "Failed to update model file";
+		constexpr auto kModelRemoveFailedMessage = "Failed to remove model file";
+		constexpr auto kModelSaveFailedMessage   = "Failed to save model file";
 		constexpr auto kExistingModelsIncompatibleMessage =
 		    "Existing face models use incompatible face-recognition metadata";
+		constexpr auto kStoredModelsIncompatibleMessage =
+		    "Stored face models use incompatible face-recognition metadata";
 
 		auto ModelChangedFailure() -> UserModelMutationResult {
 			return UserModelMutationResult{
@@ -89,11 +89,46 @@ namespace howdy::native {
 			return MutationFailure(failure_status, std::move(failure_message));
 		}
 
-		auto EntryMatches(const UserModelEntry &entry, const UserModelEntryExpectation &expected)
-		    -> bool {
-			return entry.id == expected.id && entry.time == expected.time &&
-			       entry.label == expected.label && entry.backend == expected.backend &&
-			       entry.metric == expected.metric && entry.model == expected.model;
+		// The one backend/model compatibility rule. An empty expectation is not checked.
+		auto CheckCompatibility(const std::vector<UserModelEntry> &entries,
+		                        const std::string                 &expected_backend,
+		                        const std::string &expected_model) -> UserModelStatus {
+			for (const auto &entry : entries) {
+				if (!expected_backend.empty() && entry.backend != expected_backend) {
+					return UserModelStatus::kIncompatibleBackend;
+				}
+				if (!expected_model.empty() && entry.model != expected_model) {
+					return UserModelStatus::kIncompatibleModel;
+				}
+			}
+			return UserModelStatus::kOk;
+		}
+
+		// Applies the compatibility rule to a successful load.
+		auto RequireCompatible(UserModelListResult models, const std::string &expected_backend,
+		                       const std::string &expected_model) -> UserModelListResult {
+			if (models.status != UserModelStatus::kOk) {
+				return models;
+			}
+			const auto compatibility =
+			    CheckCompatibility(models.entries, expected_backend, expected_model);
+			if (compatibility != UserModelStatus::kOk) {
+				return UserModelsListFailure(compatibility, kStoredModelsIncompatibleMessage);
+			}
+			return models;
+		}
+
+		// Encodes entries and commits them through the locked transaction; an entry the codec
+		// rejects becomes the mutation failure.
+		auto WriteEntries(const UserModelStoreTransaction   &transaction,
+		                  const std::vector<UserModelEntry> &entries, int next_id)
+		    -> std::expected<AtomicFileCommitResult, UserModelMutationResult> {
+			auto encoded = user_model_codec::Encode(entries, next_id);
+			if (encoded.status != UserModelStatus::kOk) {
+				return std::unexpected(
+				    MutationFailure(encoded.status, std::move(encoded.error_message)));
+			}
+			return transaction.WriteContent(encoded.content);
 		}
 
 		auto RemapLoadStatus(UserModelStatus status) -> UserModelStatus {
@@ -106,14 +141,14 @@ namespace howdy::native {
 			return status;
 		}
 
-		auto RemoveEntryFromDocument(const UserModelStoreTransaction &transaction,
-		                             user_model_codec::Document *document, UserModelEntry removed,
-		                             std::vector<UserModelEntry>::difference_type found_index)
+		// Removes one entry, keeping the stored next id so the removed id is never reissued.
+		auto RemoveEntry(const UserModelStoreTransaction &transaction, UserModelListResult models,
+		                 std::vector<UserModelEntry>::difference_type found_index)
 		    -> UserModelMutationResult {
-			if (!user_model_codec::EraseEntry(*document, static_cast<std::size_t>(found_index))) {
-				return MutationFailure(UserModelStatus::kWriteFailed, kModelUpdateFailedMessage);
-			}
-			if (user_model_codec::IsEmpty(*document)) {
+			auto          &entries = models.entries;
+			UserModelEntry removed = std::move(entries.at(static_cast<std::size_t>(found_index)));
+			entries.erase(entries.begin() + found_index);
+			if (entries.empty()) {
 				const auto commit_result = transaction.RemoveFile();
 				if (!AtomicFileCommitIsDurable(commit_result)) {
 					return CommitFailure(commit_result, UserModelStatus::kDeleteFailed,
@@ -129,10 +164,13 @@ namespace howdy::native {
 				    .removed_last = true,
 				};
 			}
-			const auto commit_result = transaction.WriteDocument(*document);
-			if (!AtomicFileCommitIsDurable(commit_result)) {
+			const auto commit_result = WriteEntries(transaction, entries, models.next_id);
+			if (!commit_result.has_value()) {
+				return commit_result.error();
+			}
+			if (!AtomicFileCommitIsDurable(*commit_result)) {
 				return CommitFailure(
-				    commit_result, UserModelStatus::kWriteFailed, kModelUpdateFailedMessage,
+				    *commit_result, UserModelStatus::kWriteFailed, kModelUpdateFailedMessage,
 				    "Model file was updated, but its directory could not be synced; verify state "
 				    "before retrying",
 				    std::move(removed));
@@ -149,19 +187,9 @@ namespace howdy::native {
 	                          const std::string                            &expected_model,
 	                          const file_security_internal::ValidationRoot &validation_root)
 	    -> UserModelListResult {
-		const auto document =
-		    UserModelStore::LoadDocument(user,
-			                             {
-		                                     .backend      = expected_backend,
-		                                     .model        = expected_model,
-		                                     .strict_shape = true,
-		                                 },
-			                             DefaultSecureOwnerUid(), validation_root);
-		const auto &entries = document.Result();
-		if (entries.status != UserModelStatus::kOk) {
-			return UserModelsListFailure(entries.status, entries.error_message);
-		}
-		return entries;
+		return RequireCompatible(
+		    UserModelStore::LoadModels(user, DefaultSecureOwnerUid(), validation_root),
+		    expected_backend, expected_model);
 	}
 
 	auto InspectUserModelFile(const std::string                            &user,
@@ -173,81 +201,62 @@ namespace howdy::native {
 	auto AppendUserModelEntry(const std::string &user, const NewUserModelEntry &new_entry,
 	                          const file_security_internal::ValidationRoot &validation_root)
 	    -> UserModelMutationResult {
-		auto        mutation = UserModelStore::BeginMutation(user, validation_root);
-		auto const &entries  = mutation.document.Result();
-		if (entries.status != UserModelStatus::kOk && entries.status != UserModelStatus::kNoModel) {
-			return MutationFailure(entries.status, entries.error_message);
+		auto  mutation = UserModelStore::BeginMutation(user, validation_root);
+		auto &models   = mutation.models;
+		if (models.status != UserModelStatus::kOk && models.status != UserModelStatus::kNoModel) {
+			return MutationFailure(models.status, models.error_message);
 		}
 		if (!mutation.transaction.has_value()) {
 			return InternalInvariantFailure();
 		}
-		if (!new_entry.label.empty() && !IsValidModelLabel(new_entry.label)) {
-			return MutationFailure(UserModelStatus::kInvalidShape,
-			                       kNewFaceModelEntryInvalidMessage);
-		}
-		if (new_entry.encodings.empty()) {
-			return MutationFailure(UserModelStatus::kInvalidShape,
-			                       kNewFaceModelEntryInvalidMessage);
-		}
-		if (new_entry.encodings.size() > user_model_limits::kMaxEncodingsPerModel) {
-			return MutationFailure(UserModelStatus::kOversized,
-			                       std::string(kStoredEncodingsLimitMessage));
-		}
-		if (entries.entries.size() >= user_model_limits::kMaxStoredModels) {
-			return MutationFailure(UserModelStatus::kOversized,
-			                       std::string(kStoredModelListLimitMessage));
-		}
-		if (entries.next_id >= std::numeric_limits<int>::max()) {
-			return MutationFailure(UserModelStatus::kInvalidShape,
-			                       std::string(kStoredModelIdLimitMessage));
-		}
-		for (const auto &entry : entries.entries) {
-			if (!entry.backend.empty() && entry.backend != new_entry.backend) {
-				return MutationFailure(UserModelStatus::kIncompatibleBackend,
-				                       kExistingModelsIncompatibleMessage);
-			}
-			if (!entry.model.empty() && entry.model != new_entry.model) {
-				return MutationFailure(UserModelStatus::kIncompatibleModel,
-				                       kExistingModelsIncompatibleMessage);
-			}
-		}
-		for (const auto &encoding : new_entry.encodings) {
-			const auto validation = user_model_codec::ValidateEncoding(encoding);
-			if (validation.status != UserModelStatus::kOk) {
-				return MutationFailure(validation.status, validation.error_message);
-			}
+		const auto compatibility =
+		    CheckCompatibility(models.entries, new_entry.backend, new_entry.model);
+		if (compatibility != UserModelStatus::kOk) {
+			return MutationFailure(compatibility, kExistingModelsIncompatibleMessage);
 		}
 
+		// The codec enforces every entry rule when the list is encoded, but it reads and re-writes
+		// labels under the safety rule only, so the display rule for new labels is checked here.
+		if (!new_entry.label.empty()) {
+			auto label_check = user_model_codec::ValidateNewLabel(new_entry.label);
+			if (label_check.status != UserModelStatus::kOk) {
+				return MutationFailure(label_check.status, std::move(label_check.error_message));
+			}
+		}
+		const auto     id = models.next_id;
 		UserModelEntry entry{
-		    .id        = entries.next_id,
-		    .time      = static_cast<std::int64_t>(std::time(nullptr)),
-		    .label     = new_entry.label.empty() ? ("Model #" + std::to_string(entries.next_id))
-			                                     : new_entry.label,
-		    .backend   = new_entry.backend,
-		    .metric    = new_entry.metric,
-		    .model     = new_entry.model,
+		    .id      = id,
+		    .time    = static_cast<std::int64_t>(std::time(nullptr)),
+		    .label   = new_entry.label.empty() ? ("Model #" + std::to_string(id)) : new_entry.label,
+		    .backend = new_entry.backend,
+		    .metric  = new_entry.metric,
+		    .model   = new_entry.model,
 		    .encodings = new_entry.encodings,
 		};
-		if (!user_model_codec::AppendEntry(mutation.document, entry)) {
-			return MutationFailure(UserModelStatus::kWriteFailed, kModelSaveFailedMessage);
+		models.entries.push_back(std::move(entry));
+		const auto &added = models.entries.back();
+		const auto  commit_result =
+		    WriteEntries(*mutation.transaction, models.entries, user_model_codec::NextIdAfter(id));
+		if (!commit_result.has_value()) {
+			return commit_result.error();
 		}
-		const auto commit_result = mutation.transaction->WriteDocument(mutation.document);
-		if (!AtomicFileCommitIsDurable(commit_result)) {
-			return CommitFailure(commit_result, UserModelStatus::kWriteFailed,
+		if (!AtomicFileCommitIsDurable(*commit_result)) {
+			return CommitFailure(*commit_result, UserModelStatus::kWriteFailed,
 			                     kModelSaveFailedMessage,
 			                     "Model file was updated, but its directory could not be synced; "
 			                     "verify state before "
 			                     "retrying",
-			                     entry);
+			                     added);
 		}
-		return UserModelMutationResult{.status = UserModelStatus::kOk, .entry = std::move(entry)};
+		return UserModelMutationResult{.status = UserModelStatus::kOk, .entry = added};
 	}
 
-	auto RemoveUserModelEntryIfMatches(
-	    const std::string &user, const UserModelEntryExpectation &expected,
-	    const file_security_internal::ValidationRoot &validation_root) -> UserModelMutationResult {
+	auto
+	RemoveUserModelEntryIfMatches(const std::string &user, const UserModelEntry &expected,
+	                              const file_security_internal::ValidationRoot &validation_root)
+	    -> UserModelMutationResult {
 		auto  mutation = UserModelStore::BeginMutation(user, validation_root);
-		auto &entries  = mutation.document.Result();
+		auto &entries  = mutation.models;
 		if (entries.status != UserModelStatus::kOk) {
 			return MutationFailure(entries.status, entries.error_message);
 		}
@@ -255,21 +264,15 @@ namespace howdy::native {
 			return InternalInvariantFailure();
 		}
 
-		const auto found =
-		    std::ranges::find_if(entries.entries, [&expected](const UserModelEntry &entry) -> bool {
-			    return entry.id == expected.id;
-		    });
+		// The whole entry must still match, encodings included: ids restart once the model file is
+		// deleted, so a newer enrollment can repeat every other field.
+		const auto found = std::ranges::find(entries.entries, expected);
 		if (found == entries.entries.end()) {
 			return ModelChangedFailure();
 		}
-		if (!EntryMatches(*found, expected)) {
-			return ModelChangedFailure();
-		}
 
-		UserModelEntry removed     = *found;
-		const auto     found_index = std::distance(entries.entries.begin(), found);
-		return RemoveEntryFromDocument(*mutation.transaction, &mutation.document,
-		                               std::move(removed), found_index);
+		const auto found_index = std::distance(entries.entries.begin(), found);
+		return RemoveEntry(*mutation.transaction, std::move(entries), found_index);
 	}
 
 	auto ClearUserModelEntriesIfUnchanged(
@@ -310,19 +313,18 @@ namespace howdy::native {
 		};
 	}
 
-	auto LoadUserModels(const std::string &user, const std::string &expected_backend)
-	    -> UserModelLoadResult {
-		return LoadUserModels(user, expected_backend, DefaultSecureOwnerUid());
+	auto LoadUserModels(const std::string &user, const std::string &expected_backend,
+	                    const std::string &expected_model) -> UserModelLoadResult {
+		return LoadUserModels(user, expected_backend, expected_model, DefaultSecureOwnerUid());
 	}
 
 	auto LoadUserModels(const std::string &user, const std::string &expected_backend,
-	                    std::optional<uid_t>                          owner_uid,
+	                    const std::string &expected_model, std::optional<uid_t> owner_uid,
 	                    const file_security_internal::ValidationRoot &validation_root)
 	    -> UserModelLoadResult {
-		auto document = UserModelStore::LoadDocument(
-		    user, {.backend = expected_backend, .model = {}, .strict_shape = false}, owner_uid,
-		    validation_root);
-		auto               &entries = document.Result();
+		auto entries =
+		    RequireCompatible(UserModelStore::LoadModels(user, owner_uid, validation_root),
+			                  expected_backend, expected_model);
 		UserModelLoadResult result{
 		    .status        = RemapLoadStatus(entries.status),
 		    .error_message = entries.error_message,

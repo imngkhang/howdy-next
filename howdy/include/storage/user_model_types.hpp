@@ -15,9 +15,11 @@ namespace howdy::native {
 		std::int64_t                    time = 0;
 		std::string                     label;
 		std::string                     backend;
-		std::optional<FaceMetric>       metric;
+		FaceMetric                      metric = FaceMetric::kCosine;
 		std::string                     model;
 		std::vector<std::vector<float>> encodings;
+
+		friend auto operator==(const UserModelEntry &, const UserModelEntry &) -> bool = default;
 	};
 
 	struct NewUserModelEntry {
@@ -49,15 +51,6 @@ namespace howdy::native {
 		UserModelStatus                      status = UserModelStatus::kNoModel;
 		std::string                          error_message;
 		std::optional<UserModelFileSnapshot> snapshot;
-	};
-
-	struct UserModelEntryExpectation {
-		int                       id   = -1;
-		std::int64_t              time = 0;
-		std::string               label;
-		std::string               backend;
-		std::optional<FaceMetric> metric;
-		std::string               model;
 	};
 
 	struct UserModelMutationResult {

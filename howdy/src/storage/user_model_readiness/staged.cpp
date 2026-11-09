@@ -1,6 +1,7 @@
 #include "internal.hpp"
 #include "protocol/auth_helper_protocol.hpp"
 #include "storage/staged_runtime_policy.hpp"
+#include "storage/user_model_path.hpp"
 #include "support/bit_flags.hpp"
 #include "support/scoped_fd.hpp"
 #include "support/user_names.hpp"
@@ -9,7 +10,6 @@
 #include <filesystem>
 #include <optional>
 #include <string>
-#include <string_view>
 
 #include <fcntl.h>
 #include <unistd.h>
@@ -145,12 +145,12 @@ namespace howdy::native {
 				return StagedPathKind::kMalformed;
 			}
 
-			const auto                 model_name = path.filename().string();
-			constexpr std::string_view extension  = ".dat";
-			if (!model_name.ends_with(extension)) {
+			const auto model_name = path.filename().string();
+			if (!model_name.ends_with(kUserModelFileExtension)) {
 				return StagedPathKind::kMalformed;
 			}
-			const auto user = model_name.substr(0, model_name.size() - extension.size());
+			const auto user =
+			    model_name.substr(0, model_name.size() - kUserModelFileExtension.size());
 			if (!IsValidModelUserName(user)) {
 				return StagedPathKind::kMalformed;
 			}

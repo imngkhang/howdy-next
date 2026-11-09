@@ -2,6 +2,7 @@
 
 #include "app/command_invocation.hpp"
 #include "cli/remove/internal.hpp"
+#include "storage/user_model_codec.hpp"
 #include "storage/user_model_status.hpp"
 #include "storage/user_model_types.hpp"
 #include "storage/user_models.hpp"
@@ -23,9 +24,9 @@ namespace {
 		return howdy::native::ListUserModelEntries(user, {});
 	}
 
-	auto RemoveUserModelEntryIfMatchesDependency(
-	    [[maybe_unused]] void *context, const std::string &user,
-	    const howdy::native::UserModelEntryExpectation &expected)
+	auto RemoveUserModelEntryIfMatchesDependency([[maybe_unused]] void               *context,
+	                                             const std::string                   &user,
+	                                             const howdy::native::UserModelEntry &expected)
 	    -> howdy::native::UserModelMutationResult {
 		return howdy::native::RemoveUserModelEntryIfMatches(user, expected);
 	}
@@ -64,21 +65,14 @@ auto howdy::native::remove_internal::RemoveMainWithDependencies(
 	if (parse_error != std::errc() || end != id_view.end()) {
 		id = -1;
 	}
-	bool                                     found = false;
-	std::string                              found_label;
-	howdy::native::UserModelEntryExpectation expected;
+	bool                          found = false;
+	std::string                   found_label;
+	howdy::native::UserModelEntry expected;
 	for (const auto &model : models.entries) {
 		if (model.id == id && std::to_string(model.id) == id_text) {
 			found       = true;
 			found_label = model.label;
-			expected    = howdy::native::UserModelEntryExpectation{
-			    .id      = model.id,
-			    .time    = model.time,
-			    .label   = model.label,
-			    .backend = model.backend,
-			    .metric  = model.metric,
-			    .model   = model.model,
-			};
+			expected    = model;
 			break;
 		}
 	}
@@ -89,7 +83,8 @@ auto howdy::native::remove_internal::RemoveMainWithDependencies(
 	}
 
 	if (!invocation.assume_yes) {
-		std::cout << "Model \"" << found_label << "\" will be removed for " << user << ".\n";
+		std::cout << "Model \"" << howdy::native::user_model_codec::DisplayModelLabel(found_label)
+		          << "\" will be removed for " << user << ".\n";
 		std::cout << "Continue? [y/N]: ";
 		std::string answer;
 		std::getline(std::cin, answer);

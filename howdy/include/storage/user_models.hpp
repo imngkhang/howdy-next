@@ -10,10 +10,10 @@
 
 namespace howdy::native {
 
-	auto LoadUserModels(const std::string &user, const std::string &expected_backend)
-	    -> UserModelLoadResult;
 	auto LoadUserModels(const std::string &user, const std::string &expected_backend,
-	                    std::optional<uid_t>                          owner_uid,
+	                    const std::string &expected_model) -> UserModelLoadResult;
+	auto LoadUserModels(const std::string &user, const std::string &expected_backend,
+	                    const std::string &expected_model, std::optional<uid_t> owner_uid,
 	                    const file_security_internal::ValidationRoot &validation_root = {})
 	    -> UserModelLoadResult;
 	auto ListUserModelEntries(const std::string &user, const std::string &expected_backend,
@@ -27,7 +27,7 @@ namespace howdy::native {
 	                          const file_security_internal::ValidationRoot &validation_root = {})
 	    -> UserModelMutationResult;
 	auto RemoveUserModelEntryIfMatches(
-	    const std::string &user, const UserModelEntryExpectation &expected,
+	    const std::string &user, const UserModelEntry &expected,
 	    const file_security_internal::ValidationRoot &validation_root = {})
 	    -> UserModelMutationResult;
 	auto ClearUserModelEntriesIfUnchanged(

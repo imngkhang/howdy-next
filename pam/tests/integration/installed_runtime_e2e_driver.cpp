@@ -1,4 +1,5 @@
 
+#include "model_assets/opencv_model_manifest.hpp"
 #include "runtime/runtime_session.hpp"
 #include "storage/user_model_readiness.hpp"
 #include "storage/user_model_status.hpp"
@@ -72,8 +73,9 @@ auto main(int argc, char **argv) -> int {
 		std::cerr << "Failed to select staged user-model directory: " << strerror(errno) << "\n";
 		return 1;
 	}
-	const auto models =
-	    howdy::native::LoadUserModels(user, "opencv_dnn_sface", static_cast<uid_t>(0));
+	const auto models = howdy::native::LoadUserModels(
+	    user, "opencv_dnn_sface", std::string(howdy::native::kSfaceModelDescriptor.filename),
+	    static_cast<uid_t>(0));
 	const auto readiness = howdy::native::CheckUserModelReadiness(session.UserModelsDir(), user, 0);
 	const bool absent    = mode == "--hold-absent";
 	if (absent ? readiness.status != howdy::native::UserModelStatus::kNoModel

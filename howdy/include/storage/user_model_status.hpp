@@ -10,12 +10,6 @@ namespace howdy::native {
 	    "Failed to inspect user model file";
 	inline constexpr std::string_view kUserModelChangedMessage =
 	    "User model file changed, please rerun the command";
-	inline constexpr std::string_view kStoredEncodingsLimitMessage =
-	    "Stored face model contains too many encodings";
-	inline constexpr std::string_view kStoredModelListLimitMessage =
-	    "Stored face model list exceeds safety limit";
-	inline constexpr std::string_view kStoredModelIdLimitMessage =
-	    "Stored face model ID is too large";
 
 	enum class UserModelStatus : std::uint8_t {
 		kOk,

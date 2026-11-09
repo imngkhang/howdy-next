@@ -13,6 +13,7 @@
 #include "config/runtime_config_loader.hpp"
 #include "config/runtime_paths.hpp"
 #include "protocol/compare_exit.hpp"
+#include "storage/user_model_codec.hpp"
 #include "storage/user_model_status.hpp"
 #include "storage/user_model_types.hpp"
 #include "storage/user_models.hpp"
@@ -273,7 +274,9 @@ namespace {
 		    std::cmp_less(result.winning_index, context.stored_encodings.get().models.size())) {
 			const auto &winner = context.stored_encodings.get().models.at(
 			    static_cast<std::size_t>(result.winning_index));
-			std::cout << "Winning model: " << winner.id << " (\"" << winner.label << "\")\n";
+			std::cout << "Winning model: " << winner.id << " (\""
+			          << howdy::native::user_model_codec::DisplayModelLabel(winner.label)
+			          << "\")\n";
 		}
 	}
 
@@ -394,14 +397,15 @@ namespace {
 				return static_cast<int>(CompareExit::kAbort);
 			}
 
-			auto loaded_models =
-			    howdy::native::LoadUserModels(args.user, howdy::native::FaceModel::kBackendName,
-				                              trusted_owner_uid, validation_root);
+			auto loaded_models = howdy::native::LoadUserModels(
+			    args.user, howdy::native::FaceModel::kBackendName,
+			    howdy::native::FaceModel::kSfaceModel, trusted_owner_uid, validation_root);
 			if (loaded_models.status == howdy::native::UserModelStatus::kInvalidUser) {
 				std::cerr << loaded_models.error_message << "\n";
 				return static_cast<int>(CompareExit::kAbort);
 			}
-			if (loaded_models.status == howdy::native::UserModelStatus::kIncompatibleBackend) {
+			if (loaded_models.status == howdy::native::UserModelStatus::kIncompatibleBackend ||
+			    loaded_models.status == howdy::native::UserModelStatus::kIncompatibleModel) {
 				std::cerr << loaded_models.error_message << "\n";
 				return static_cast<int>(CompareExit::kNoFaceModel);
 			}

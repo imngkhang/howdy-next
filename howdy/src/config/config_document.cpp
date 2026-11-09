@@ -1,6 +1,7 @@
 #include "config/config_limits.hpp"
 #include "config/config_schema.hpp"
 #include "config_document/internal.hpp"
+#include "support/rust_ffi/text.hpp"
 
 #include "howdy_ffi.h"
 
@@ -25,6 +26,9 @@ namespace howdy::native {
 
 	namespace {
 
+		using rust_ffi::Text;
+		using rust_ffi::View;
+
 		struct DocumentDeleter {
 			void operator()(HowdyConfigDocument *document) const noexcept {
 				howdy_config_document_free(document);
@@ -39,14 +43,6 @@ namespace howdy::native {
 
 		using DocumentHandle   = std::unique_ptr<HowdyConfigDocument, DocumentDeleter>;
 		using EditResultHandle = std::unique_ptr<HowdyConfigEditResult, EditResultDeleter>;
-
-		auto View(std::string_view text) -> HowdyStr {
-			return {.ptr = text.data(), .len = text.size()};
-		}
-
-		auto Text(HowdyStr text) -> std::string_view {
-			return text.len == 0 ? std::string_view{} : std::string_view(text.ptr, text.len);
-		}
 
 		auto PositionPrefix(std::size_t line, std::size_t column) -> std::string {
 			if (line == 0) {

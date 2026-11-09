@@ -2,6 +2,7 @@
 
 #include "app/command_invocation.hpp"
 #include "cli/list/internal.hpp"
+#include "storage/user_model_codec.hpp"
 #include "storage/user_model_status.hpp"
 #include "storage/user_model_types.hpp"
 #include "storage/user_models.hpp"
@@ -89,7 +90,8 @@ auto howdy::native::list_internal::ListMainWithDependencies(
 		}
 		std::cout << (valid_time ? buffer.data() : "invalid-time");
 		std::cout << (invocation.plain ? "," : "  ");
-		std::cout << (invocation.plain ? CsvField(model.label) : model.label) << "\n";
+		const auto label = howdy::native::user_model_codec::DisplayModelLabel(model.label);
+		std::cout << (invocation.plain ? CsvField(label) : label) << "\n";
 	}
 
 	std::cout << "\n";

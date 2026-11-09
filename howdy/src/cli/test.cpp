@@ -136,11 +136,16 @@ namespace {
 		production_context->loaded_models = howdy::native::UserModelLoadResult{};
 		if (!user.empty()) {
 			production_context->loaded_models =
-			    howdy::native::LoadUserModels(user, howdy::native::FaceModel::kBackendName);
+			    howdy::native::LoadUserModels(user, howdy::native::FaceModel::kBackendName,
+				                              howdy::native::FaceModel::kSfaceModel);
 			if (production_context->loaded_models.status ==
 			    howdy::native::UserModelStatus::kIncompatibleBackend) {
 				std::cout << "Warning: Stored face models use an incompatible backend; matching "
 				             "disabled\n";
+			} else if (production_context->loaded_models.status ==
+			           howdy::native::UserModelStatus::kIncompatibleModel) {
+				std::cout << "Warning: Stored face models use an incompatible recognition model; "
+				             "matching disabled\n";
 			} else if (production_context->loaded_models.status ==
 			           howdy::native::UserModelStatus::kInvalidUser) {
 				std::cout << "Warning: Invalid user name; matching disabled\n";

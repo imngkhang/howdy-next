@@ -3,13 +3,11 @@
 #include "cli/add/internal.hpp"
 #include "compare/logic.hpp"
 #include "config/runtime_config_loader.hpp"
-#include "storage/user_model_label.hpp"
+#include "storage/user_model_codec.hpp"
 #include "storage/user_model_status.hpp"
 #include "storage/user_model_types.hpp"
 #include "vision/face_model.hpp"
 
-#include <algorithm>
-#include <cstddef>
 #include <iostream>
 #include <string>
 #include <utility>
@@ -18,15 +16,12 @@ namespace {
 
 	constexpr auto kAddExitOk    = 0;
 	constexpr auto kAddExitAbort = 1;
-	// Command-line labels over this are rejected; typed labels are cut to it.
-	constexpr std::size_t kMaxLabelBytes = 24;
 
 	struct AddArgs {
 		std::string user;
 		std::string label;
-		bool        label_provided = false;
-		bool        plain          = false;
-		bool        yes            = false;
+		bool        plain = false;
+		bool        yes   = false;
 	};
 
 	void PrintCaptureFailure(const howdy::native::EnrollmentCaptureResult &capture_result,
@@ -70,17 +65,22 @@ auto howdy::native::add_internal::AddMainWithDependencies(
 	const AddArgs args{
 	    .user  = *invocation.resolved_user,
 	    .label = invocation.positionals.empty() ? std::string{} : invocation.positionals.front(),
-	    .label_provided = !invocation.positionals.empty(),
-	    .plain          = invocation.plain,
-	    .yes            = invocation.assume_yes,
+	    .plain = invocation.plain,
+	    .yes   = invocation.assume_yes,
 	};
-	if (args.label_provided && !howdy::native::IsValidModelLabel(args.label)) {
-		std::cerr << "Invalid model label\n";
-		return kAddExitAbort;
-	}
-	if (args.label.size() > kMaxLabelBytes) {
-		std::cerr << "Model label is too long (maximum " << kMaxLabelBytes << " bytes)\n";
-		return kAddExitAbort;
+	// Command-line labels breaking the codec's label rule are rejected; typed labels are cut to
+	// fit below. The codec reports "too long" only when cutting would make the label valid.
+	if (!args.label.empty()) {
+		const auto problem = user_model_codec::CheckModelLabel(args.label);
+		if (problem == user_model_codec::LabelProblem::kTooLong) {
+			std::cerr << "Model label is too long (maximum " << user_model_codec::kMaxLabelBytes
+			          << " bytes)\n";
+			return kAddExitAbort;
+		}
+		if (problem != user_model_codec::LabelProblem::kNone) {
+			std::cerr << "Invalid model label\n";
+			return kAddExitAbort;
+		}
 	}
 
 	auto config_result = dependencies.load_runtime_config(dependencies.context);
@@ -116,15 +116,16 @@ auto howdy::native::add_internal::AddMainWithDependencies(
 		std::getline(std::cin, input);
 		if (!input.empty()) {
 			// Cut on a UTF-8 code point boundary so a long multibyte label stays valid.
-			std::size_t cut = std::min(input.size(), kMaxLabelBytes);
-			while (cut > 0 && cut < input.size() &&
-			       howdy::native::user_model_label_detail::IsUtf8Continuation(input.at(cut))) {
-				--cut;
+			const auto cut = user_model_codec::ModelLabelPrefixLength(input);
+			if (!cut.has_value()) {
+				std::cerr << "Invalid model label\n";
+				return kAddExitAbort;
 			}
-			label = input.substr(0, cut);
+			label = input.substr(0, *cut);
 		}
 	}
-	if (!howdy::native::IsValidModelLabel(label)) {
+	// An empty label selects the automatic "Model #<id>" label.
+	if (!label.empty() && !user_model_codec::IsValidModelLabel(label)) {
 		std::cerr << "Invalid model label\n";
 		return kAddExitAbort;
 	}

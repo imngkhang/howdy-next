@@ -19,13 +19,13 @@ namespace {
 	using howdy::test::StreamRedirect;
 
 	struct RemoveCliTestContext {
-		howdy::native::UserModelListResult       list_result;
-		howdy::native::UserModelMutationResult   remove_result;
-		int                                      list_calls   = 0;
-		int                                      remove_calls = 0;
-		std::string                              listed_user;
-		std::string                              removed_user;
-		howdy::native::UserModelEntryExpectation expected;
+		howdy::native::UserModelListResult     list_result;
+		howdy::native::UserModelMutationResult remove_result;
+		int                                    list_calls   = 0;
+		int                                    remove_calls = 0;
+		std::string                            listed_user;
+		std::string                            removed_user;
+		howdy::native::UserModelEntry          expected;
 	};
 
 	auto ValidEntry() -> howdy::native::UserModelEntry {
@@ -61,7 +61,7 @@ namespace {
 	}
 
 	auto RemoveCallback(void *raw_context, const std::string &user,
-	                    const howdy::native::UserModelEntryExpectation &expected)
+	                    const howdy::native::UserModelEntry &expected)
 	    -> howdy::native::UserModelMutationResult {
 		auto *context = static_cast<RemoveCliTestContext *>(raw_context);
 		++context->remove_calls;
