@@ -7,6 +7,7 @@ local files add detail but do not override these invariants.
 
 - [`ci/archlinux/AGENTS.md`](ci/archlinux/AGENTS.md): Arch Linux CI image and workflow rules
 - [`ci/nix/AGENTS.md`](ci/nix/AGENTS.md): Nix CI image, Flake, and module checks
+- [`crates/AGENTS.md`](crates/AGENTS.md): Rust workspace, FFI boundary, and Cargo checks
 - [`howdy/AGENTS.md`](howdy/AGENTS.md): native Howdy package
 - [`pam/AGENTS.md`](pam/AGENTS.md): PAM module
 
@@ -14,7 +15,8 @@ Package-level files route to narrower subsystem guidance.
 
 ## Build and Test
 
-Use CMake 3.31+ and C++23.
+Use CMake 3.31+, C++23, and Rust (see `rust-version` in `Cargo.toml`) with Corrosion and
+cbindgen. `cargo-deny` is needed only for the `howdy_cargo_deny` target.
 
 ```sh
 cmake --preset release
@@ -60,6 +62,9 @@ git ls-files '*.cpp' '*.hpp' | xargs clang-format -i
 
 # CMake (format, then enforce the LSP's C0301 100-column limit, which `format` does not check)
 git ls-files -z '*CMakeLists.txt' '*.cmake' | xargs -0 sh -c 'neocmakelsp format -i "$@" && awk '\''length > 100 { print FILENAME ":" FNR ": " length; bad = 1 } END { exit bad }'\'' "$@"' sh
+
+# Rust
+cargo fmt --all
 
 # Markdown
 rumdl fmt .
