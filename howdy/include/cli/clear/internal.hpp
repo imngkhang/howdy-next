@@ -15,10 +15,14 @@ namespace howdy::native::clear_internal {
 	    void *context, const std::string &user,
 	    const howdy::native::UserModelFileSnapshot &expected_snapshot);
 
+	// Optional: drops staged runtime copies after the models are cleared.
+	using PurgeStagedCopiesFn = void (*)(void *context, const std::string &user);
+
 	struct ClearDependencies {
 		void                              *context                               = nullptr;
 		InspectUserModelFileFn             inspect_user_model_file               = nullptr;
 		ClearUserModelEntriesIfUnchangedFn clear_user_model_entries_if_unchanged = nullptr;
+		PurgeStagedCopiesFn                purge_staged_copies                   = nullptr;
 	};
 
 	auto ClearMainWithDependencies(const CommandInvocation &invocation,

@@ -23,6 +23,8 @@ namespace {
 		howdy::native::UserModelMutationResult   remove_result;
 		int                                      list_calls   = 0;
 		int                                      remove_calls = 0;
+		int                                      purge_calls  = 0;
+		std::string                              purged_user;
 		std::string                              listed_user;
 		std::string                              removed_user;
 		howdy::native::UserModelEntryExpectation expected;
@@ -70,6 +72,12 @@ namespace {
 		return context->remove_result;
 	}
 
+	auto PurgeCallback(void *raw_context, const std::string &user) -> void {
+		auto *context = static_cast<RemoveCliTestContext *>(raw_context);
+		++context->purge_calls;
+		context->purged_user = user;
+	}
+
 	auto RunRemoveWithDependencies(
 	    const howdy::native::CommandInvocation                   &invocation,
 	    const howdy::native::remove_internal::RemoveDependencies &dependencies,
@@ -91,6 +99,7 @@ namespace {
 		                                     .context                            = &context,
 		                                     .list_user_model_entries            = ListCallback,
 		                                     .remove_user_model_entry_if_matches = RemoveCallback,
+		                                     .purge_staged_copies                = PurgeCallback,
 		                                 },
 		                                 input);
 	}
@@ -253,6 +262,42 @@ namespace {
 		              "last-model removal preserves disabled message");
 	}
 
+	// The staged copy is dropped whenever the model may be gone, including uncertain commits,
+	// and kept when the store reports that nothing changed.
+	auto StagedCopiesPurgedWheneverRemovalMayHaveCommitted() -> bool {
+		using howdy::native::UserModelStatus;
+		bool ok = true;
+		for (const auto &[status, expect_purge] : {
+		         std::pair{UserModelStatus::kOk, true},
+		         std::pair{UserModelStatus::kDurabilityUncertain, true},
+		         std::pair{UserModelStatus::kCommitStateUncertain, true},
+		         std::pair{UserModelStatus::kModelChanged, false},
+		         std::pair{UserModelStatus::kWriteFailed, false},
+		     }) {
+			auto context                 = SuccessContext();
+			context.remove_result.status = status;
+			auto [result, output]        = RunRemove(
+			    context, {.resolved_user = "alice", .positionals = {"3"}, .assume_yes = true});
+			ok &= Expect(result == (status == UserModelStatus::kOk ? 0 : 1),
+			             "only a clean removal returns 0");
+			ok &= Expect(context.purge_calls == (expect_purge ? 1 : 0),
+			             "staged copies are purged exactly when the removal may have committed");
+			ok &= Expect(!expect_purge || context.purged_user == "alice",
+			             "purge targets the removed user");
+		}
+
+		auto context          = SuccessContext();
+		auto [result, output] = RunRemoveWithDependencies(
+		    {.resolved_user = "alice", .positionals = {"3"}, .assume_yes = true},
+		    {
+		        .context                            = &context,
+		        .list_user_model_entries            = ListCallback,
+		        .remove_user_model_entry_if_matches = RemoveCallback,
+		    });
+		ok &= Expect(result == 0 && context.purge_calls == 0, "purge callback is optional");
+		return ok;
+	}
+
 }  // namespace
 
 auto main() -> int {
@@ -266,5 +311,6 @@ auto main() -> int {
 	ok &= YesFlagBypassesConfirmation();
 	ok &= RemoveFailureForwardsError();
 	ok &= LastModelSuccessPrintsDisabledMessage();
+	ok &= StagedCopiesPurgedWheneverRemovalMayHaveCommitted();
 	return ok ? 0 : 1;
 }

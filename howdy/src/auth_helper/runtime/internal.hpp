@@ -31,6 +31,11 @@ namespace howdy::native::auth_helper::runtime_internal {
 
 	using SlotSet = std::array<std::optional<Slot>, 2>;
 
+	// Serializes every run that builds, refreshes, or purges one user's slots.
+	[[nodiscard]] inline auto AllocationLockName(uid_t target_uid) -> std::string {
+		return ".pam-" + std::to_string(target_uid) + ".lock";
+	}
+
 	[[nodiscard]] __attribute__((visibility("hidden"))) auto
 	SourceUnchanged(const SourceFile &source) -> bool;
 
@@ -69,5 +74,14 @@ namespace howdy::native::auth_helper::runtime_internal {
 	                     const std::optional<SourceFile> &model_source, const std::string &user,
 	                     internal::StagedIdentity identity, const AclOperations &operations)
 	    -> std::optional<PreparedPaths>;
+
+	// Opens and validates the runtime root without ever creating it.
+	[[nodiscard]] __attribute__((visibility("hidden"))) auto
+	OpenExistingRoot(const std::filesystem::path &path, uid_t owner_uid, gid_t owner_gid,
+	                 bool &missing) -> std::optional<UniqueFd>;
+
+	[[nodiscard]] __attribute__((visibility("hidden"))) auto
+	PurgeSlots(int root_fd, const std::filesystem::path &root, internal::StagedIdentity identity,
+	           const AclOperations &operations) -> StagedPurgeResult;
 
 }  // namespace howdy::native::auth_helper::runtime_internal

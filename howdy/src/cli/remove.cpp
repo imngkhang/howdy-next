@@ -1,6 +1,7 @@
 #include "cli/remove.hpp"
 
 #include "app/command_invocation.hpp"
+#include "auth_helper/staged_copies.hpp"
 #include "cli/remove/internal.hpp"
 #include "storage/user_model_status.hpp"
 #include "storage/user_model_types.hpp"
@@ -28,6 +29,10 @@ namespace {
 	    const howdy::native::UserModelEntryExpectation &expected)
 	    -> howdy::native::UserModelMutationResult {
 		return howdy::native::RemoveUserModelEntryIfMatches(user, expected);
+	}
+
+	void PurgeStagedCopiesDependency([[maybe_unused]] void *context, const std::string &user) {
+		howdy::native::auth_helper::PurgeStagedCopiesForUser(user, std::cout);
 	}
 
 }  // namespace
@@ -102,6 +107,15 @@ auto howdy::native::remove_internal::RemoveMainWithDependencies(
 
 	const auto remove_result =
 	    dependencies.remove_user_model_entry_if_matches(dependencies.context, user, expected);
+	// The staged copy holds every model of the user, including the one just removed. An
+	// uncertain commit may have removed it too, so it is purged in those cases as well.
+	const bool may_have_removed =
+	    remove_result.status == howdy::native::UserModelStatus::kOk ||
+	    remove_result.status == howdy::native::UserModelStatus::kDurabilityUncertain ||
+	    remove_result.status == howdy::native::UserModelStatus::kCommitStateUncertain;
+	if (may_have_removed && dependencies.purge_staged_copies != nullptr) {
+		dependencies.purge_staged_copies(dependencies.context, user);
+	}
 	if (remove_result.status != howdy::native::UserModelStatus::kOk) {
 		std::cout << remove_result.error_message << "\n";
 		return kRemoveExitAbort;
@@ -121,5 +135,6 @@ auto RemoveMain(const howdy::native::CommandInvocation &invocation) -> int {
 	    howdy::native::remove_internal::RemoveDependencies{
 	        .list_user_model_entries            = RemoveCliUserModelEntriesDependency,
 	        .remove_user_model_entry_if_matches = RemoveUserModelEntryIfMatchesDependency,
+	        .purge_staged_copies                = PurgeStagedCopiesDependency,
 	    });
 }

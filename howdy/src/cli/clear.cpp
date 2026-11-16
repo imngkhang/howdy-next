@@ -1,6 +1,7 @@
 #include "cli/clear.hpp"
 
 #include "app/command_invocation.hpp"
+#include "auth_helper/staged_copies.hpp"
 #include "cli/clear/internal.hpp"
 #include "storage/user_model_status.hpp"
 #include "storage/user_model_types.hpp"
@@ -29,6 +30,10 @@ namespace {
 		return howdy::native::ClearUserModelEntriesIfUnchanged(
 		    user, expected_snapshot,
 		    *static_cast<howdy::native::file_security_internal::ValidationRoot *>(context));
+	}
+
+	void PurgeStagedCopiesDependency([[maybe_unused]] void *context, const std::string &user) {
+		howdy::native::auth_helper::PurgeStagedCopiesForUser(user, std::cout);
 	}
 
 }  // namespace
@@ -79,6 +84,15 @@ auto howdy::native::clear_internal::ClearMainWithDependencies(
 		std::cout << kNoFaceModelsFoundMessage << '\n';
 		return kClearExitOk;
 	}
+	// An uncertain commit may have cleared the models, so the staged copy goes in those cases
+	// as well.
+	const bool may_have_cleared =
+	    clear_result.status == howdy::native::UserModelStatus::kOk ||
+	    clear_result.status == howdy::native::UserModelStatus::kDurabilityUncertain ||
+	    clear_result.status == howdy::native::UserModelStatus::kCommitStateUncertain;
+	if (may_have_cleared && dependencies.purge_staged_copies != nullptr) {
+		dependencies.purge_staged_copies(dependencies.context, user);
+	}
 	if (clear_result.status != howdy::native::UserModelStatus::kOk) {
 		std::cout << clear_result.error_message << "\n";
 		return kClearExitAbort;
@@ -96,6 +110,9 @@ auto howdy::native::clear_internal::ClearMainWithValidationRoot(
 	        .context                               = &validation_root,
 	        .inspect_user_model_file               = InspectUserModelFileDependency,
 	        .clear_user_model_entries_if_unchanged = ClearUserModelEntriesIfUnchangedDependency,
+	        // A fixture root has no staged copies; only the production store is purged.
+	        .purge_staged_copies =
+	            validation_root.path.empty() ? PurgeStagedCopiesDependency : nullptr,
 	    });
 }
 
