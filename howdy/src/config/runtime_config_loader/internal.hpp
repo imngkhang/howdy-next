@@ -107,9 +107,7 @@ namespace howdy::native {
 		}
 		const float value =
 		    reader.GetFloat(std::string(option.section), std::string(option.key), *fallback);
-		const auto *range   = std::get_if<config_schema::FloatRange>(&option.range);
-		const float minimum = range != nullptr ? range->minimum : 0.0F;
-		return value >= minimum && value <= policy->threshold_maximum ? value : *fallback;
+		return FaceMetricThresholdAllowed(*policy, value) ? value : *fallback;
 	}
 
 }  // namespace howdy::native

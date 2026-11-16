@@ -369,6 +369,13 @@ namespace howdy::native::config_schema {
 		return std::string(buffer.data(), result.ptr);
 	}
 
+	auto FormatSfaceThresholdRange(const FaceMetricPolicy &policy) -> std::string {
+		const auto minimum = FormatFloatingPointValue(kFaceMetricThresholdMinimum).value_or("0");
+		const auto maximum = FormatFloatingPointValue(policy.threshold_maximum).value_or("");
+		return policy.threshold_minimum_exclusive ? "above " + minimum + " up to " + maximum
+		                                          : minimum + ".." + maximum;
+	}
+
 	namespace {
 
 		auto FormatRuntimeDefault(const RuntimeDefault &value) -> std::optional<std::string> {
