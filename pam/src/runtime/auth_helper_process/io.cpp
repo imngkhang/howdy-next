@@ -4,8 +4,10 @@
 
 #include "internal.hpp"
 #include "protocol/compare_exit.hpp"
+#include "runtime/child_process.hpp"
 #include "support/error_message.hpp"
 #include "support/process_status.hpp"
+#include "support/scoped_fd.hpp"
 
 #include <algorithm>
 #include <cerrno>
@@ -72,13 +74,20 @@ namespace howdy::pam::auth_helper_process::internal {
 			return MakeAuthHelperWaitExitStatus(CompareExit::kAbort);
 		}
 
-		if (kill(child_pid, SIGTERM) != 0) {
-			const int error_number = errno;
-			if (error_number != ESRCH) {
+		// The wait above just showed the helper as this process's unreaped child, so the PID
+		// still names it. Signals go through a pidfd from here on, because the PID can be reused
+		// if the PAM application reaps the helper during the grace period below.
+		const howdy::native::ScopedFd pidfd(howdy::pam::runtime::OpenChildPidfd(child_pid));
+		const auto signal_helper = [&](int signal, const char *action) noexcept -> void {
+			const bool sent = pidfd.Valid()
+			                      ? howdy::pam::runtime::SignalChildPidfd(pidfd.Get(), signal)
+			                      : kill(child_pid, signal) == 0 || errno == ESRCH;
+			if (!sent) {
 				syslog(LOG_AUTHPRIV | LOG_WARNING,
-				       "pam_howdy: Failed to terminate auth helper process (%d)", error_number);
+				       "pam_howdy: Failed to %s auth helper process (%d)", action, errno);
 			}
-		}
+		};
+		signal_helper(SIGTERM, "terminate");
 
 		for (int attempts = 0; attempts < 50; ++attempts) {
 			status                  = 0;
@@ -95,13 +104,18 @@ namespace howdy::pam::auth_helper_process::internal {
 			usleep(10000);
 		}
 
-		if (kill(child_pid, SIGKILL) != 0) {
-			const int error_number = errno;
-			if (error_number != ESRCH) {
-				syslog(LOG_AUTHPRIV | LOG_WARNING,
-				       "pam_howdy: Failed to kill auth helper process (%d)", error_number);
+		if (!pidfd.Valid()) {
+			// Without a pidfd, confirm the helper is still unreaped right before the kill.
+			status                  = 0;
+			const pid_t wait_result = waitpid(child_pid, &status, WNOHANG);
+			if (wait_result == child_pid) {
+				return status;
+			}
+			if (wait_result < 0 && errno != EINTR) {
+				return MakeAuthHelperWaitExitStatus(CompareExit::kAbort);
 			}
 		}
+		signal_helper(SIGKILL, "kill");
 		return WaitForHelperProcess(child_pid);
 	}
 

@@ -35,6 +35,8 @@
 namespace {
 	struct WaitTestState {
 		bool              fail_pidfd         = false;
+		int               waitid_error       = 0;
+		bool              fail_pidfd_signal  = false;
 		bool              fail_eventfd       = false;
 		bool              fail_eventfd_write = false;
 		int               last_pidfd         = -1;
@@ -71,6 +73,14 @@ extern "C" auto TestKill(pid_t pid, int signal) -> int __asm__("__wrap_kill");
 extern "C" auto RealKill(pid_t pid, int signal) -> int __asm__("__real_kill");
 extern "C" auto TestWaitpid(pid_t pid, int *status, int options) -> pid_t __asm__("__wrap_waitpid");
 extern "C" auto RealWaitpid(pid_t pid, int *status, int options) -> pid_t __asm__("__real_waitpid");
+extern "C" auto TestPidfdSendSignal(int pidfd, int signal, siginfo_t *info, unsigned int flags)
+    -> int __asm__("__wrap_pidfd_send_signal");
+extern "C" auto RealPidfdSendSignal(int pidfd, int signal, siginfo_t *info, unsigned int flags)
+    -> int __asm__("__real_pidfd_send_signal");
+extern "C" auto TestWaitid(idtype_t id_type, id_t id, siginfo_t *info, int options)
+    -> int __asm__("__wrap_waitid");
+extern "C" auto RealWaitid(idtype_t id_type, id_t id, siginfo_t *info, int options)
+    -> int __asm__("__real_waitid");
 
 auto TestPidfdOpen(pid_t pid, unsigned int flags) -> int {
 	if (WaitState().fail_pidfd) {
@@ -122,14 +132,47 @@ auto TestPpollChecked(pollfd *fds, nfds_t count, const timespec *timeout, const 
 	return TestPpoll(fds, count, timeout, mask);
 }
 
+namespace {
+	void CountSignal(int signal) {
+		if (signal == SIGTERM) {
+			++WaitState().term_calls;
+		}
+		if (signal == SIGKILL) {
+			++WaitState().kill_calls;
+		}
+	}
+}  // namespace
+
 auto TestKill(pid_t pid, int signal) -> int {
-	if (signal == SIGTERM) {
-		++WaitState().term_calls;
-	}
-	if (signal == SIGKILL) {
-		++WaitState().kill_calls;
-	}
+	CountSignal(signal);
 	return RealKill(pid, signal);
+}
+
+auto TestPidfdSendSignal(int pidfd, int signal, siginfo_t *info, unsigned int flags) -> int {
+	if (WaitState().fail_pidfd_signal) {
+		errno = EPERM;
+		return -1;
+	}
+	CountSignal(signal);
+	return RealPidfdSendSignal(pidfd, signal, info, flags);
+}
+
+// Records what a pidfd reap consumed, in wait(2) form, ignoring peeks and empty polls.
+auto TestWaitid(idtype_t id_type, id_t id, siginfo_t *info, int options) -> int {
+	if (id_type == P_PIDFD && WaitState().waitid_error != 0) {
+		errno = WaitState().waitid_error;
+		return -1;
+	}
+	const int result = RealWaitid(id_type, id, info, options);
+	if (result == 0 && id_type == P_PIDFD && info != nullptr && info->si_pid != 0 &&
+	    (static_cast<unsigned int>(options) & static_cast<unsigned int>(WNOWAIT)) == 0U) {
+		const auto value = static_cast<unsigned int>(info->si_status);
+		WaitState().reaped_status =
+		    info->si_code == CLD_EXITED
+		        ? static_cast<int>((value & 0xffU) << 8U)
+		        : static_cast<int>((value & 0x7fU) | (info->si_code == CLD_DUMPED ? 0x80U : 0U));
+	}
+	return result;
 }
 
 auto TestWaitpid(pid_t pid, int *status, int options) -> pid_t {
@@ -369,6 +412,57 @@ namespace {
 		                  howdy::native::EncodeWaitExitStatus(howdy::native::CompareExit::kAbort),
 		              "pidfd/ppoll failure returns abort") &&
 		       Expect(ChildReaped(child), "pidfd/ppoll failure reaps child");
+	}
+
+	// A kernel or filter that rejects pidfd waits must not leave compare running.
+	auto TestUnusablePidfdWaitStopsChild() -> bool {
+		const pid_t child = SpawnBlockedChild();
+		if (!Expect(child > 0, "unusable pidfd wait spawns child")) {
+			return false;
+		}
+		WaitState().waitid_error = EINVAL;
+		const int status         = howdy::pam::compare_process::WaitUntil(
+		    child, std::chrono::steady_clock::now() + 5s, nullptr, nullptr, -1);
+		WaitState().waitid_error = 0;
+		return Expect(status ==
+		                  howdy::native::EncodeWaitExitStatus(howdy::native::CompareExit::kAbort),
+		              "unusable pidfd wait returns abort") &&
+		       Expect(ChildReaped(child), "unusable pidfd wait kills and reaps child by PID");
+	}
+
+	// A child the application already reaped is never signalled: its PID may be reused.
+	auto TestReapedElsewhereIsNotSignalled() -> bool {
+		const pid_t child = SpawnBlockedChild();
+		if (!Expect(child > 0, "reaped-elsewhere spawns child")) {
+			return false;
+		}
+		WaitState().waitid_error = ECHILD;
+		WaitState().term_calls = WaitState().kill_calls = 0;
+		const int status                                = howdy::pam::compare_process::WaitUntil(
+		    child, std::chrono::steady_clock::now() + 5s, nullptr, nullptr, -1);
+		WaitState().waitid_error = 0;
+		const bool untouched     = WaitState().term_calls == 0 && WaitState().kill_calls == 0;
+		howdy::pam::compare_process::CancelAndReap(child);
+		return Expect(status ==
+		                  howdy::native::EncodeWaitExitStatus(howdy::native::CompareExit::kAbort),
+		              "child reaped elsewhere returns abort") &&
+		       Expect(untouched, "child reaped elsewhere is not signalled");
+	}
+
+	// A refused pidfd signal must not turn the final reap into an endless wait.
+	auto TestRefusedPidfdSignalFallsBackToPid() -> bool {
+		const pid_t child = SpawnSigtermIgnoringChild();
+		if (!Expect(child > 0, "refused pidfd signal spawns child")) {
+			return false;
+		}
+		WaitState().fail_pidfd_signal = true;
+		const int status              = howdy::pam::compare_process::WaitUntil(
+		    child, std::chrono::steady_clock::now(), nullptr, nullptr, -1);
+		WaitState().fail_pidfd_signal = false;
+		return Expect(status ==
+		                  howdy::native::EncodeWaitExitStatus(howdy::native::CompareExit::kAbort),
+		              "refused pidfd signal returns abort") &&
+		       Expect(ChildReaped(child), "refused pidfd signal kills and reaps child by PID");
 	}
 
 	auto TestEventfdWakesWait() -> bool {
@@ -617,6 +711,9 @@ auto main() -> int {
 	ok &= TestWaitFailure(false, true);
 	ok &= TestEventfdWakesWait();
 	ok &= TestInterruptedWaitAndEscalation();
+	ok &= TestUnusablePidfdWaitStopsChild();
+	ok &= TestReapedElsewhereIsNotSignalled();
+	ok &= TestRefusedPidfdSignalFallsBackToPid();
 	ok &= TestWatchdogTimeoutReapsBlockedChild();
 	ok &= TestWatchdogKillsSigtermIgnoringChild();
 	ok &= TestWatchdogPreservesNaturalExitStatus();

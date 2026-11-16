@@ -127,6 +127,46 @@ namespace {
 		return ok;
 	}
 
+	// A PAM application that reaps children itself can take the compare child first. The wait
+	// must then fail closed without signalling: the PID no longer belongs to compare.
+	auto ExpectReapedElsewhereFailsClosed() -> bool {
+		bool        ok        = true;
+		const pid_t child_pid = SpawnExitingChild(0);
+		ok &= Expect(child_pid > 0, "spawns child that the application reaps");
+		if (child_pid <= 0) {
+			return false;
+		}
+		int status = 0;
+		ok &= Expect(howdy::native::RetryOnEintr([&] -> pid_t {
+			             return waitpid(child_pid, &status, 0);
+		             }) == child_pid,
+		             "application reaps the child first");
+		const int result = howdy::pam::compare_process::WaitUntil(
+		    child_pid, std::chrono::steady_clock::now() + std::chrono::seconds(1), nullptr, nullptr,
+		    -1);
+		const auto abort_code = static_cast<int>(howdy::native::CompareExit::kAbort);
+		ok &= Expect(WIFEXITED(result) && WEXITSTATUS(result) == abort_code,
+		             "wait on a child reaped elsewhere returns abort, not its success status");
+		return ok;
+	}
+
+	auto ExpectSignalledChildStatus() -> bool {
+		bool        ok        = true;
+		const pid_t child_pid = SpawnBlockedChild();
+		ok &= Expect(child_pid > 0, "spawns child to kill");
+		if (child_pid <= 0) {
+			return false;
+		}
+		ok &= Expect(kill(child_pid, SIGKILL) == 0, "kills compare child externally");
+		const int status = howdy::pam::compare_process::WaitUntil(
+		    child_pid, std::chrono::steady_clock::now() + std::chrono::seconds(5), nullptr, nullptr,
+		    -1);
+		ok &= Expect(WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL,
+		             "compare wait reports the terminating signal");
+		ok &= Expect(ChildReaped(child_pid), "signalled compare child is reaped");
+		return ok;
+	}
+
 	auto ExpectProcessWaiting() -> bool {
 		bool        ok                = true;
 		const pid_t compare_child_pid = SpawnExitingChild(7);
@@ -173,6 +213,8 @@ namespace {
 
 		ok &= ExpectTerminalOutcomePreserved(false);
 		ok &= ExpectTerminalOutcomePreserved(true);
+		ok &= ExpectReapedElsewhereFailsClosed();
+		ok &= ExpectSignalledChildStatus();
 
 		const pid_t cleanup_child = SpawnSigtermIgnoringChild();
 		ok &= Expect(cleanup_child > 0, "spawns compare child for noexcept cleanup");

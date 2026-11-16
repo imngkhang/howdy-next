@@ -10,6 +10,7 @@ Read [`../../AGENTS.md`](../../AGENTS.md) first.
 - `auth_helper_process/io.cpp`: bounded I/O, timeout, wait, terminate, reap
 - `auth_helper_process/lease.cpp`: SCM_RIGHTS lease transport and validation
 - `compare_process.cpp`: compare argv/environment, descriptor closure, timeout/reap
+- `child_process.cpp`: pidfd open, wait, and signal primitives shared by both child lifecycles
 
 `auth_helper_process/internal.hpp` is private cross-TU plumbing.
 
@@ -17,6 +18,11 @@ Read [`../../AGENTS.md`](../../AGENTS.md) first.
 
 Preserve process/FD ownership, EINTR behavior, deadline semantics, timeout termination/reap, helper
 output bounds, protocol validation, and lease path/owner/mode/device/inode/flock checks.
+
+Signal and reap the compare child through its pidfd, never its PID: a PAM application that reaps
+children itself can free the PID for reuse. A PID is only safe to signal right after `waitpid`
+reported it as an unreaped child, which is the fallback when no pidfd can be opened.
+`<sys/pidfd.h>` has no include guard, so only `child_process.cpp` includes it.
 
 `RuntimeSession` is one-shot. Invalid staged paths, missing typed config, or repeated load attempts
 fail closed. Compare runs with a fixed environment, never copied from the caller. Direct runtime

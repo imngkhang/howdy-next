@@ -7,6 +7,7 @@
 #include "paths.hpp"
 #include "protocol/compare_exit.hpp"
 #include "protocol/compare_invocation.hpp"
+#include "runtime/child_process.hpp"
 #include "runtime/compare_launch.hpp"
 #include "support/eintr.hpp"
 #include "support/error_message.hpp"
@@ -37,11 +38,6 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 
-// Keep C linkage explicit for glibc headers without a C++ linkage guard.
-extern "C" {
-#include <sys/pidfd.h>
-}
-
 namespace {
 	using CompareOperations   = howdy::pam::compare_process::Operations;
 	using CompareSpawnRequest = howdy::pam::compare_process::SpawnRequest;
@@ -63,27 +59,41 @@ namespace {
 		return howdy::native::EncodeWaitExitStatus(exit_code);
 	}
 
-	enum class ChildState : std::uint8_t {
-		kRunning,
-		kReaped,
-		kError,
-	};
+	using howdy::pam::runtime::ChildState;
 
-	auto TryWaitForCompare(pid_t child_pid, int *status) -> ChildState {
+	// The PID is only safe to signal while waitpid still reports it as this process's unreaped
+	// child, so check immediately before the kill. Used when the pidfd cannot do the job.
+	void KillAndReapCompareByPid(pid_t child_pid) noexcept {
+		int         status = 0;
 		const pid_t result = howdy::native::RetryOnEintr([&] -> pid_t {
-			return waitpid(child_pid, status, WNOHANG);
+			return waitpid(child_pid, &status, WNOHANG);
 		});
-		if (result == child_pid) {
-			return ChildState::kReaped;
+		// Reap only a child the kill reached; waiting on one it missed would never return.
+		if (result != 0 || kill(child_pid, SIGKILL) != 0) {
+			return;
 		}
-		if (result == 0) {
-			return ChildState::kRunning;
+		(void)howdy::native::RetryOnEintr([&] -> pid_t {
+			return waitpid(child_pid, &status, 0);
+		});
+	}
+
+	// Every wait and signal goes through the pidfd, never the PID: if the PAM application reaps
+	// children itself, the PID can be reused while compare is still being tracked here.
+	// ECHILD means exactly that happened, so nothing is signalled. Any other failure means the
+	// pidfd wait is unusable (kernel before 5.4, or a filter on the PAM application), and the
+	// child is stopped by PID so it cannot keep running with the camera open.
+	auto TryWaitForCompare(int pidfd, pid_t child_pid, int *status) -> ChildState {
+		const auto state = howdy::pam::runtime::WaitChildPidfd(pidfd, false, status);
+		if (state == ChildState::kError) {
+			const int error_number = errno;
+			syslog(LOG_AUTHPRIV | LOG_ERR, "pam_howdy: waitid failed for compare process: %s (%d)",
+			       howdy::native::SystemErrorMessage(error_number).c_str(), error_number);
+			if (error_number != ECHILD) {
+				KillAndReapCompareByPid(child_pid);
+			}
+			*status = MakeCompareWaitExitStatus(CompareExit::kAbort);
 		}
-		const int error_number = errno;
-		syslog(LOG_AUTHPRIV | LOG_ERR, "pam_howdy: waitpid failed for compare process: %s (%d)",
-		       howdy::native::SystemErrorMessage(error_number).c_str(), error_number);
-		*status = MakeCompareWaitExitStatus(CompareExit::kAbort);
-		return ChildState::kError;
+		return state;
 	}
 
 	enum class WaitOutcome : std::uint8_t {
@@ -142,23 +152,20 @@ namespace {
 		}
 	}
 
-	auto ReapCompare(pid_t child_pid) -> std::optional<int> {
-		int         status = 0;
-		const pid_t result = howdy::native::RetryOnEintr([&] -> pid_t {
-			return waitpid(child_pid, &status, 0);
-		});
-		if (result == child_pid) {
+	auto ReapCompare(int pidfd) -> std::optional<int> {
+		int status = 0;
+		if (howdy::pam::runtime::WaitChildPidfd(pidfd, true, &status) == ChildState::kReaped) {
 			return status;
 		}
 		const int error_number = errno;
 		syslog(LOG_AUTHPRIV | LOG_ERR,
-		       "pam_howdy: waitpid failed while reaping compare process: %s (%d)",
+		       "pam_howdy: waitid failed while reaping compare process: %s (%d)",
 		       howdy::native::SystemErrorMessage(error_number).c_str(), error_number);
 		return std::nullopt;
 	}
 
-	auto SignalCompare(pid_t child_pid, int signal) -> bool {
-		if (kill(child_pid, signal) != 0 && errno != ESRCH) {
+	auto SignalCompare(int pidfd, int signal) -> bool {
+		if (!howdy::pam::runtime::SignalChildPidfd(pidfd, signal)) {
 			const int error_number = errno;
 			syslog(LOG_AUTHPRIV | LOG_ERR,
 			       "pam_howdy: Failed to signal compare process (%d): %s (%d)", signal,
@@ -169,7 +176,7 @@ namespace {
 	}
 
 	auto OpenComparePidfd(pid_t child_pid) -> howdy::native::ScopedFd {
-		howdy::native::ScopedFd pidfd(pidfd_open(child_pid, 0));
+		howdy::native::ScopedFd pidfd(howdy::pam::runtime::OpenChildPidfd(child_pid));
 		if (!pidfd.Valid()) {
 			const int error_number = errno;
 			syslog(LOG_AUTHPRIV | LOG_ERR,
@@ -203,17 +210,13 @@ namespace {
 		}
 		const auto pidfd = OpenComparePidfd(child_pid);
 		if (!pidfd.Valid()) {
-			int status = 0;
-			if (TryWaitForCompare(child_pid, &status) == ChildState::kRunning) {
-				(void)SignalCompare(child_pid, SIGKILL);
-				(void)ReapCompare(child_pid);
-			}
+			KillAndReapCompareByPid(child_pid);
 			return abort_status;
 		}
 
 		// Preserve exit-before-cancellation precedence and the terminal decision once made.
 		int status = 0;
-		if (TryWaitForCompare(child_pid, &status) != ChildState::kRunning) {
+		if (TryWaitForCompare(pidfd.Get(), child_pid, &status) != ChildState::kRunning) {
 			return status;
 		}
 		WaitOutcome outcome = WaitOutcome::kTimeout;
@@ -223,32 +226,34 @@ namespace {
 			outcome = PollCompareUntil(pidfd.Get(), cancellation_fd, deadline);
 		}
 		if (outcome == WaitOutcome::kExited) {
-			return ReapCompare(child_pid).value_or(abort_status);
+			return ReapCompare(pidfd.Get()).value_or(abort_status);
 		}
 		int        terminal_status = outcome == WaitOutcome::kTimeout
 		                                 ? MakeCompareWaitExitStatus(CompareExit::kTimeoutReached)
 		                                 : abort_status;
-		const auto child_state     = TryWaitForCompare(child_pid, &status);
+		const auto child_state     = TryWaitForCompare(pidfd.Get(), child_pid, &status);
 		if (child_state != ChildState::kRunning) {
 			return child_state == ChildState::kReaped ? terminal_status : abort_status;
 		}
 		if (outcome != WaitOutcome::kError) {
-			if (!SignalCompare(child_pid, SIGTERM)) {
+			if (!SignalCompare(pidfd.Get(), SIGTERM)) {
 				terminal_status = abort_status;
 			}
 			const auto grace =
 			    PollCompareUntil(pidfd.Get(), -1, Clock::now() + kCompareTerminationGrace);
 			if (grace == WaitOutcome::kExited) {
-				return ReapCompare(child_pid).has_value() ? terminal_status : abort_status;
+				return ReapCompare(pidfd.Get()).has_value() ? terminal_status : abort_status;
 			}
 			if (grace == WaitOutcome::kError) {
 				terminal_status = abort_status;
 			}
 		}
-		if (!SignalCompare(child_pid, SIGKILL)) {
-			terminal_status = abort_status;
+		if (!SignalCompare(pidfd.Get(), SIGKILL)) {
+			// A blocking reap would wait forever on a child that was never signalled.
+			KillAndReapCompareByPid(child_pid);
+			return abort_status;
 		}
-		return ReapCompare(child_pid).has_value() ? terminal_status : abort_status;
+		return ReapCompare(pidfd.Get()).has_value() ? terminal_status : abort_status;
 	}
 
 	auto CallPosixSpawnFileActionsInit(void *context, posix_spawn_file_actions_t *actions) -> int {
@@ -373,11 +378,7 @@ namespace howdy::pam::compare_process {
 			(void)WaitForCompareProcess(child_pid, std::chrono::steady_clock::now(), nullptr,
 			                            nullptr, -1);
 		} catch (...) {
-			(void)kill(child_pid, SIGKILL);
-			int status = 0;
-			(void)howdy::native::RetryOnEintr([&] -> pid_t {
-				return waitpid(child_pid, &status, 0);
-			});
+			KillAndReapCompareByPid(child_pid);
 		}
 	}
 
